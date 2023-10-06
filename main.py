@@ -1,6 +1,12 @@
 import random
 
 
+# Hyperparameters
+ALPHA = 0.1
+GAMMA = 0.9
+EPSILON = 0.1
+
+
 class Card:
     def __init__(self, suit=None, rank=None, special=None):
         self.suit = suit
@@ -119,13 +125,53 @@ class Player:
 
 
 class AIAgent(Player):
+    def __init__(self, name):
+        super().__init__(name)
+        self.q_table = {}
+
+    def get_state(self):
+        # A simple state representation for illustrative purposes
+        # In a real scenario, this will be more complex
+        hand_ranks = tuple(card.rank for card in sorted(self.hand, key=lambda c: c.rank if c.rank else 0))
+        return hand_ranks
+
     def make_bid(self):
-        # This is a naive bid strategy: bid the number of cards >= 10 in hand.
-        # You'd want more sophisticated logic in a real game.
+        # This can be further refined
         self.bid = len([card for card in self.hand if card.rank and card.rank >= 10])
         return self.bid
 
-    # Override the play_card method with a more sophisticated AI logic.
+    def play_card(self, leading_suit=None):
+        state = self.get_state()
+        if state not in self.q_table:
+            self.q_table[state] = {i: 0 for i in range(len(self.hand))}
+
+        # Epsilon-greedy strategy
+        if random.uniform(0, 1) < EPSILON:
+            action = random.choice(range(len(self.hand)))
+        else:
+            action = max(self.q_table[state], key=self.q_table[state].get)
+
+        card_to_play = self.hand[action]
+        self.hand.remove(card_to_play)
+        return card_to_play
+
+    def update_q_value(self, old_state, action, reward, new_state):
+        max_future_q = max(self.q_table[new_state].values())
+        current_q = self.q_table[old_state][action]
+
+        # Q-learning formula
+        new_q = (1 - ALPHA) * current_q + ALPHA * (reward + GAMMA * max_future_q)
+        self.q_table[old_state][action] = new_q
+
+    def take_reward(self, reward):
+        # After the agent receives a reward, update Q-values
+        new_state = self.get_state()
+        # You need to keep track of the old state and action
+        # This is a simplified representation
+        old_state = new_state  # This is a placeholder, you'd typically store the previous state
+        action = 0  # Placeholder, you'd typically store the previous action
+
+        self.update_q_value(old_state, action, reward, new_state)
 
 
 def deal_cards(players, round_number):
@@ -171,6 +217,27 @@ def gather_bids(players, round_number):
     print(bid_message)
 
 
+def play_tricks(players, round_number):
+    for _ in range(round_number):
+        current_trick = []
+
+        for player in players:
+            player.is_trick_leader = False
+            leading_suit = determine_leading_suit(current_trick)
+            card_played = player.play_card(leading_suit if leading_suit else None)
+            current_trick.append((player, card_played))
+            print(f"{player.name} plays {card_played}")
+
+        # Determine the winner of the trick
+        winner = determine_winner(current_trick)
+        bonus_points = determine_bonus_points(current_trick)
+        winner[0].tricks_taken += 1
+        winner[0].bonus_points += bonus_points
+        winner[0].is_trick_leader = True
+        players = determine_turn_order(players)
+        print(f"\n{winner[0].name} wins the trick!\n")
+
+
 def determine_leading_suit(trick):
     leading_suit = None
     for player, card in trick:
@@ -178,6 +245,33 @@ def determine_leading_suit(trick):
             leading_suit = card.suit
             break
     return leading_suit
+
+
+def determine_bonus_points(trick):
+    bonus_points = 0
+    king_played = None
+    pirates_captured_by_king = 0
+
+    for player, card in trick:
+        if card.special == "Skull King":
+            king_played = player
+
+    if king_played:
+        for player, card in trick:
+            if card.special == "Pirate":
+                pirates_captured_by_king += 1
+            elif card.special == "Tigress" and card.played_as == "Pirate":
+                pirates_captured_by_king += 1
+        bonus_points += pirates_captured_by_king * 30  # For each pirate captured by the king
+
+    for player, card in trick:
+        if card.rank == 14:
+            if card.suit != "Black":
+                bonus_points += 10
+            else:
+                bonus_points += 20
+
+    return bonus_points
 
 
 def determine_winner(trick):
@@ -209,54 +303,6 @@ def determine_winner(trick):
         if (highest_special[1].special == 'Escape' or highest_special[1].played_as == 'Escape') and not only_escapes:
             return highest_suit_card or highest_special
     return highest_special or highest_suit_card
-
-
-def determine_bonus_points(trick):
-    bonus_points = 0
-    king_played = None
-    pirates_captured_by_king = 0
-
-    for player, card in trick:
-        if card.special == "Skull King":
-            king_played = player
-
-    if king_played:
-        for player, card in trick:
-            if card.special == "Pirate":
-                pirates_captured_by_king += 1
-            elif card.special == "Tigress" and card.played_as == "Pirate":
-                pirates_captured_by_king += 1
-        bonus_points += pirates_captured_by_king * 30  # For each pirate captured by the king
-
-    for player, card in trick:
-        if card.rank == 14:
-            if card.suit != "Black":
-                bonus_points += 10
-            else:
-                bonus_points += 20
-
-    return bonus_points
-
-
-def play_tricks(players, round_number):
-    for _ in range(round_number):
-        current_trick = []
-
-        for player in players:
-            player.is_trick_leader = False
-            leading_suit = determine_leading_suit(current_trick)
-            card_played = player.play_card(leading_suit if leading_suit else None)
-            current_trick.append((player, card_played))
-            print(f"{player.name} plays {card_played}")
-
-        # Determine the winner of the trick
-        winner = determine_winner(current_trick)
-        bonus_points = determine_bonus_points(current_trick)
-        winner[0].tricks_taken += 1
-        winner[0].bonus_points += bonus_points
-        winner[0].is_trick_leader = True
-        players = determine_turn_order(players)
-        print(f"\n{winner[0].name} wins the trick!\n")
 
 
 def score_round(players, round_number):
