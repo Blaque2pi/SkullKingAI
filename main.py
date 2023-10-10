@@ -129,30 +129,104 @@ class AIAgent(Player):
         super().__init__(name)
         self.q_table = {}
 
-    def get_state(self):
-        # A simple state representation for illustrative purposes
-        # In a real scenario, this will be more complex
-        hand_ranks = tuple(card.rank for card in sorted(self.hand, key=lambda c: c.rank if c.rank else 0))
-        return hand_ranks
+    def get_state(self, players, trick=None):
+        # hand should already be in a sorted state, this is good because order of cards in hand does not matter
+        special_rank = {
+            "Pirate King": 4,
+            "Tigress": 3,
+            "Pirate": 2,
+            "Escape": 1
+        }
+        suit_rank = {
+            "Black": 4,
+            "Yellow": 3,
+            "Purple": 2,
+            "Green": 1
+        }
+        # Card specials in hand encoded as integers
+        hand_specials = [special_rank[card.special] if card.special else 0 for card in self.hand]
+
+        # Card suits in hand encoded as integers
+        hand_suits = [suit_rank[card.suit] if card.suit else 0 for card in self.hand]
+
+        # Card ranks in hand (assuming max rank of 14)
+        hand_ranks = [card.rank if card.rank else 0 for card in self.hand]
+
+        # Card specials in trick encoded as integers (tigress treated as escape or pirate)
+        trick_specials = [special_rank[card.played_as] if card.played_as else special_rank[card.special] if card.special else 0 for card in trick]
+
+        # Card suits in trick encoded as integers
+        trick_suits = [suit_rank[card.suit] if card.suit else 0 for card in trick]
+
+        # Card ranks in trick (assuming max rank of 14)
+        trick_ranks = [card.rank if card.rank else 0 for card in trick]
+
+        # tricks wanted (same order as represented in trick)
+        tricks_wanted = [(player.bid - player.tricks_taken) for player in players]
+
+        # cards played previously (card counting)?
+
+        # Combining all the features into one state representation
+        state = tuple(hand_specials + hand_suits + hand_ranks + trick_specials + trick_suits + trick_ranks + tricks_wanted)
+
+        return state
+
+    def get_legal_actions(self, leading_suit=None):
+        legal_indices = []
+        contains_tigress = None
+
+        for card in self.hand:
+            if card.special == "Tigress":
+                contains_tigress = True
+
+        for index, card in enumerate(self.hand):
+            if self.determine_legality(card, leading_suit):
+                legal_indices.append(index)
+            if contains_tigress:
+                legal_indices.append(len(self.hand))
+
+        return legal_indices
 
     def make_bid(self):
         # This can be further refined
         self.bid = len([card for card in self.hand if card.rank and card.rank >= 10])
         return self.bid
 
-    def play_card(self, leading_suit=None):
-        state = self.get_state()
+    def play_card(self, players, trick, leading_suit=None):
+        state = self.get_state(players, trick)
         if state not in self.q_table:
-            self.q_table[state] = {i: 0 for i in range(len(self.hand))}
+            num_actions = len(self.hand) + self.hand.count("Tigress")
+            self.q_table[state] = {i: 0 for i in range(num_actions)}
+
+        # Retrieve the list of legal actions for the current state.
+        legal_actions = self.get_legal_actions()
 
         # Epsilon-greedy strategy
         if random.uniform(0, 1) < EPSILON:
-            action = random.choice(range(len(self.hand)))
+            # Select a random action from the set of legal actions
+            action = random.choice(legal_actions)
         else:
-            action = max(self.q_table[state], key=self.q_table[state].get)
+            # Find the max Q-value among legal actions for the current state
+            max_q_value = max([self.q_table[state][action] for action in legal_actions])
+            max_actions = [action for action in legal_actions if self.q_table[state][action] == max_q_value]
 
-        card_to_play = self.hand[action]
+            # Randomly select one of the max actions
+            action = random.choice(max_actions)
+
+        # check if tigress was played as a pirate or escape, and edit the corresponding card accordingly
+        if self.hand[action].special == "Tigress":
+            self.hand[action].played_as = "Pirate"
+            card_to_play = self.hand[action]
+        elif action == len(self.hand):
+            for card in self.hand:
+                if card.special == "Tigress":
+                    card.played_as = "Escape"
+                    card_to_play = card
+        else:
+            card_to_play = self.hand[action]
+
         self.hand.remove(card_to_play)
+
         return card_to_play
 
     def update_q_value(self, old_state, action, reward, new_state):
@@ -163,9 +237,9 @@ class AIAgent(Player):
         new_q = (1 - ALPHA) * current_q + ALPHA * (reward + GAMMA * max_future_q)
         self.q_table[old_state][action] = new_q
 
-    def take_reward(self, reward):
+    def take_reward(self, players, trick, reward):
         # After the agent receives a reward, update Q-values
-        new_state = self.get_state()
+        new_state = self.get_state(players, trick)
         # You need to keep track of the old state and action
         # This is a simplified representation
         old_state = new_state  # This is a placeholder, you'd typically store the previous state
@@ -176,17 +250,18 @@ class AIAgent(Player):
 
 def deal_cards(players, round_number):
     # All cards including suits and specials
-    colors = ["Black", "Yellow", "Blue", "Red"]
+    colors = ["Black", "Yellow", "Purple", "Green"]
     specials = [("Escape", 5), ("Pirate", 5), ("Tigress", 1), ("Skull King", 1)]
     deck = [Card(color, rank) for color in colors for rank in range(1, 15)] + [Card(None, None, special) for special, count in specials for _ in range(count)]
     print("\nDeck assembled!")
     random.shuffle(deck)
     print("Deck Shuffled!")
 
-    # Deal cards
+    # Deal cards and keep hands sorted
     for i in range(round_number):
         for player in players:
             player.hand.append(deck.pop())
+            player.hand = sorted(player.hand)
     print("Hands Dealt!")
 
 
@@ -224,7 +299,7 @@ def play_tricks(players, round_number):
         for player in players:
             player.is_trick_leader = False
             leading_suit = determine_leading_suit(current_trick)
-            card_played = player.play_card(leading_suit if leading_suit else None)
+            card_played = AIAgent.play_card(players, current_trick, leading_suit) if isinstance(player, AIAgent) else player.play_card(leading_suit if leading_suit else None)
             current_trick.append((player, card_played))
             print(f"{player.name} plays {card_played}")
 
