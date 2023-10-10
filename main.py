@@ -214,6 +214,7 @@ class AIAgent(Player):
             action = random.choice(max_actions)
 
         # check if tigress was played as a pirate or escape, and edit the corresponding card accordingly
+        card_to_play = None
         if self.hand[action].special == "Tigress":
             self.hand[action].played_as = "Pirate"
             card_to_play = self.hand[action]
