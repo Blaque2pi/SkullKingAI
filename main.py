@@ -33,6 +33,7 @@ class Player:
         self.score = 0
         self.is_human = is_human
         self.is_trick_leader = False
+        self.round_number = 0
 
     def display_hand(self):
         hand_message = f"\n{self.name}'s hand contains:\n"
@@ -128,21 +129,78 @@ class AIAgent(Player):
     def __init__(self, name):
         super().__init__(name)
         self.q_table = {}
+        self.old_state = {}
+        self.old_state_action = 0
+        self.new_state = {}
 
-    def get_state(self, players, trick=None):
+    def get_state(self, players, trick=[], captured_cards=[]):
         # hand should already be in a sorted state, this is good because order of cards in hand does not matter
-        special_rank = {
-            "Pirate King": 4,
-            "Tigress": 3,
+        # Make this a list assigning an integer value to every unique card
+        card_integers = {
+            "Escape": 1,
+            "Tigress as Escape": 2,
+            "1 of Yellow": 3,
+            "2 of Yellow": 4,
+            "3 of Yellow": 5,
+            "4 of Yellow": 6,
+            "5 of Yellow": 7,
+            "6 of Yellow": 8,
+            "7 of Yellow": 9,
+            "8 of Yellow": 10,
+            "9 of Yellow": 11,
+            "10 of Yellow": 12,
+            "11 of Yellow": 13,
+            "12 of Yellow": 14,
+            "13 of Yellow": 15,
+            "14 of Yellow": 16,
+            "1 of Purple": 3,
+            "2 of Purple": 3,
+            "3 of Purple": 3,
+            "4 of Purple": 3,
+            "5 of Purple": 3,
+            "6 of Purple": 3,
+            "7 of Purple": 3,
+            "8 of Purple": 3,
+            "9 of Purple": 3,
+            "10 of Purple": 3,
+            "11 of Purple": 3,
+            "12 of Purple": 3,
+            "13 of Purple": 3,
+            "14 of Purple": 3,
+            "1 of Green": 3,
+            "2 of Green": 3,
+            "3 of Green": 3,
+            "4 of Green": 3,
+            "5 of Green": 3,
+            "6 of Green": 3,
+            "7 of Green": 3,
+            "8 of Green": 3,
+            "9 of Green": 3,
+            "10 of Green": 3,
+            "11 of Green": 3,
+            "12 of Green": 3,
+            "13 of Green": 3,
+            "14 of Green": 3,
+            "1 of Black": 3,
+            "2 of Black": 3,
+            "3 of Black": 3,
+            "4 of Black": 3,
+            "5 of Black": 3,
+            "6 of Black": 3,
+            "7 of Black": 3,
+            "8 of Black": 3,
+            "9 of Black": 3,
+            "10 of Black": 3,
+            "11 of Black": 3,
+            "12 of Black": 3,
+            "13 of Black": 3,
+            "14 of Black": 3,
             "Pirate": 2,
-            "Escape": 1
+            "Tigress as Pirate": 1,
+            "Tigress": 3,
+            "Pirate King": 4,
         }
-        suit_rank = {
-            "Black": 4,
-            "Yellow": 3,
-            "Purple": 2,
-            "Green": 1
-        }
+
         # Card specials in hand encoded as integers
         hand_specials = [special_rank[card.special] if card.special else 0 for card in self.hand]
 
@@ -166,8 +224,15 @@ class AIAgent(Player):
 
         # cards played previously (card counting)?
 
-        # Combining all the features into one state representation
-        state = tuple(hand_specials + hand_suits + hand_ranks + trick_specials + trick_suits + trick_ranks + tricks_wanted)
+        # Combining all the features into one state representation, each element should be normalized
+        state = {
+            "Hand": [], # Needs normalized representation, would require assigning a unique integer to each unique card
+            "Trick": [], # Normalized representation
+            "Captured": [], # Normalized representation, need some way of tracking which cards have been played in prior tricks and which are currently in hand
+            "Round": [self.round_number/10], # Pass in round number as parameter
+            "Tricks to Bid": [(player.bid - player.tricks_taken)/self.round_number for player in players], # Normalize over round number (i.e. maxmimum allowable bid for round)
+            "Scores": [(player.score/2450 for player in players)] # Normalize over theoretical maximum score, (2450)
+        }
 
         return state
 
@@ -192,8 +257,8 @@ class AIAgent(Player):
         self.bid = len([card for card in self.hand if card.rank and card.rank >= 10])
         return self.bid
 
-    def play_card(self, players, trick, leading_suit=None):
-        state = self.get_state(players, trick)
+    def play_card(self, players, trick, leading_suit=None, captured_cards=[]):
+        state = self.get_state(players, trick, captured_cards)
         if state not in self.q_table:
             num_actions = len(self.hand) + self.hand.count("Tigress")
             self.q_table[state] = {i: 0 for i in range(num_actions)}
@@ -215,22 +280,26 @@ class AIAgent(Player):
 
         # check if tigress was played as a pirate or escape, and edit the corresponding card accordingly
         card_to_play = None
-        if self.hand[action].special == "Tigress":
-            self.hand[action].played_as = "Pirate"
-            card_to_play = self.hand[action]
-        elif action == len(self.hand):
+        if action == len(self.hand):
             for card in self.hand:
                 if card.special == "Tigress":
                     card.played_as = "Escape"
                     card_to_play = card
+        elif self.hand[action].special == "Tigress":
+            self.hand[action].played_as = "Pirate"
+            card_to_play = self.hand[action]
         else:
             card_to_play = self.hand[action]
 
         self.hand.remove(card_to_play)
+        self.old_state = state
+        self.old_state_action = action
 
         return card_to_play
 
     def update_q_value(self, old_state, action, reward, new_state):
+        # Check turn order after trick resolution to determine how many cards will be played before next decision
+        # Iterate through potential tricks that may be played before next decision and gather maximum q from those scenarios
         max_future_q = max(self.q_table[new_state].values())
         current_q = self.q_table[old_state][action]
 
@@ -238,15 +307,26 @@ class AIAgent(Player):
         new_q = (1 - ALPHA) * current_q + ALPHA * (reward + GAMMA * max_future_q)
         self.q_table[old_state][action] = new_q
 
-    def take_reward(self, players, trick, reward):
+    def take_reward(self, players, trick, reward, captured_cards):
         # After the agent receives a reward, update Q-values
-        new_state = self.get_state(players, trick)
+        new_state = self.get_state(players, trick, captured_cards)
         # You need to keep track of the old state and action
         # This is a simplified representation
         old_state = new_state  # This is a placeholder, you'd typically store the previous state
         action = 0  # Placeholder, you'd typically store the previous action
 
         self.update_q_value(old_state, action, reward, new_state)
+
+
+def sort_hand(card):
+    # Define an order for colors and specials
+    color_order = {"Yellow": 0, "Purple": 1, "Green": 2, "Black": 3}
+    special_order = ["Escape", "Pirate", "Tigress", "Skull King"]
+
+    # Assign a sort key based on color or special
+    if card.special:
+        return (4, special_order.index(card.special))
+    return (color_order[card.suit], card.rank)
 
 
 def deal_cards(players, round_number):
@@ -262,7 +342,11 @@ def deal_cards(players, round_number):
     for i in range(round_number):
         for player in players:
             player.hand.append(deck.pop())
-            player.hand = sorted(player.hand)
+
+    # Sort each player's hand using the custom sort function
+    for player in players:
+        player.hand.sort(key=sort_hand)
+        player.round_number = round_number
     print("Hands Dealt!")
 
 
@@ -294,13 +378,14 @@ def gather_bids(players, round_number):
 
 
 def play_tricks(players, round_number):
+    captured_cards = []
     for _ in range(round_number):
         current_trick = []
 
         for player in players:
             player.is_trick_leader = False
             leading_suit = determine_leading_suit(current_trick)
-            card_played = AIAgent.play_card(players, current_trick, leading_suit) if isinstance(player, AIAgent) else player.play_card(leading_suit if leading_suit else None)
+            card_played = AIAgent.play_card(players, current_trick, leading_suit, captured_cards) if isinstance(player, AIAgent) else player.play_card(leading_suit if leading_suit else None)
             current_trick.append((player, card_played))
             print(f"{player.name} plays {card_played}")
 
@@ -311,6 +396,7 @@ def play_tricks(players, round_number):
         winner[0].bonus_points += bonus_points
         winner[0].is_trick_leader = True
         players = determine_turn_order(players)
+        captured_cards += current_trick
         print(f"\n{winner[0].name} wins the trick!\n")
 
 
