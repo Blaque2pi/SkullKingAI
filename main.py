@@ -128,10 +128,10 @@ class Player:
 class AIAgent(Player):
     def __init__(self, name):
         super().__init__(name)
-        self.q_table = {}
-        self.old_state = {}
-        self.old_state_action = 0
-        self.new_state = {}
+        self.q_table = {}  # Track individual q-table
+        self.old_state = {}  # Save old state temporarily for determining reward
+        self.old_state_action = 0  # Save old action temporarily for determining reward
+        self.new_state = {}  # Save new state temporarily for determining reward
 
     def get_state(self, players, trick=[], captured_cards=[]):
         # hand should already be in a sorted state, this is good because order of cards in hand does not matter
@@ -153,85 +153,62 @@ class AIAgent(Player):
             "12 of Yellow": 14,
             "13 of Yellow": 15,
             "14 of Yellow": 16,
-            "1 of Purple": 3,
-            "2 of Purple": 3,
-            "3 of Purple": 3,
-            "4 of Purple": 3,
-            "5 of Purple": 3,
-            "6 of Purple": 3,
-            "7 of Purple": 3,
-            "8 of Purple": 3,
-            "9 of Purple": 3,
-            "10 of Purple": 3,
-            "11 of Purple": 3,
-            "12 of Purple": 3,
-            "13 of Purple": 3,
-            "14 of Purple": 3,
-            "1 of Green": 3,
-            "2 of Green": 3,
-            "3 of Green": 3,
-            "4 of Green": 3,
-            "5 of Green": 3,
-            "6 of Green": 3,
-            "7 of Green": 3,
-            "8 of Green": 3,
-            "9 of Green": 3,
-            "10 of Green": 3,
-            "11 of Green": 3,
-            "12 of Green": 3,
-            "13 of Green": 3,
-            "14 of Green": 3,
-            "1 of Black": 3,
-            "2 of Black": 3,
-            "3 of Black": 3,
-            "4 of Black": 3,
-            "5 of Black": 3,
-            "6 of Black": 3,
-            "7 of Black": 3,
-            "8 of Black": 3,
-            "9 of Black": 3,
-            "10 of Black": 3,
-            "11 of Black": 3,
-            "12 of Black": 3,
-            "13 of Black": 3,
-            "14 of Black": 3,
-            "Pirate": 2,
-            "Tigress as Pirate": 1,
-            "Tigress": 3,
-            "Pirate King": 4,
+            "1 of Purple": 17,
+            "2 of Purple": 18,
+            "3 of Purple": 19,
+            "4 of Purple": 20,
+            "5 of Purple": 21,
+            "6 of Purple": 22,
+            "7 of Purple": 23,
+            "8 of Purple": 24,
+            "9 of Purple": 25,
+            "10 of Purple": 26,
+            "11 of Purple": 27,
+            "12 of Purple": 28,
+            "13 of Purple": 29,
+            "14 of Purple": 30,
+            "1 of Green": 31,
+            "2 of Green": 32,
+            "3 of Green": 33,
+            "4 of Green": 34,
+            "5 of Green": 35,
+            "6 of Green": 36,
+            "7 of Green": 37,
+            "8 of Green": 38,
+            "9 of Green": 39,
+            "10 of Green": 40,
+            "11 of Green": 41,
+            "12 of Green": 42,
+            "13 of Green": 43,
+            "14 of Green": 44,
+            "1 of Black": 45,
+            "2 of Black": 46,
+            "3 of Black": 47,
+            "4 of Black": 48,
+            "5 of Black": 49,
+            "6 of Black": 50,
+            "7 of Black": 51,
+            "8 of Black": 52,
+            "9 of Black": 53,
+            "10 of Black": 54,
+            "11 of Black": 55,
+            "12 of Black": 56,
+            "13 of Black": 57,
+            "14 of Black": 58,
+            "Pirate": 59,
+            "Tigress as Pirate": 60,
+            "Tigress": 61,
+            "Pirate King": 62,
         }
-
-        # Card specials in hand encoded as integers
-        hand_specials = [special_rank[card.special] if card.special else 0 for card in self.hand]
-
-        # Card suits in hand encoded as integers
-        hand_suits = [suit_rank[card.suit] if card.suit else 0 for card in self.hand]
-
-        # Card ranks in hand (assuming max rank of 14)
-        hand_ranks = [card.rank if card.rank else 0 for card in self.hand]
-
-        # Card specials in trick encoded as integers (tigress treated as escape or pirate)
-        trick_specials = [special_rank[card.played_as] if card.played_as else special_rank[card.special] if card.special else 0 for card in trick]
-
-        # Card suits in trick encoded as integers
-        trick_suits = [suit_rank[card.suit] if card.suit else 0 for card in trick]
-
-        # Card ranks in trick (assuming max rank of 14)
-        trick_ranks = [card.rank if card.rank else 0 for card in trick]
-
-        # tricks wanted (same order as represented in trick)
-        tricks_wanted = [(player.bid - player.tricks_taken) for player in players]
-
-        # cards played previously (card counting)?
 
         # Combining all the features into one state representation, each element should be normalized
         state = {
-            "Hand": [], # Needs normalized representation, would require assigning a unique integer to each unique card
-            "Trick": [], # Normalized representation
-            "Captured": [], # Normalized representation, need some way of tracking which cards have been played in prior tricks and which are currently in hand
-            "Round": [self.round_number/10], # Pass in round number as parameter
-            "Tricks to Bid": [(player.bid - player.tricks_taken)/self.round_number for player in players], # Normalize over round number (i.e. maxmimum allowable bid for round)
-            "Scores": [(player.score/2450 for player in players)] # Normalize over theoretical maximum score, (2450)
+            "Hand": [card_integers[card]/len(card_integers) for card in self.hand],  # Needs normalized representation, would require assigning a unique integer to each unique card
+            "Trick": [card_integers[card]/len(card_integers) for card in trick],  # Normalized representation
+            "Captured": [card_integers[card]/len(card_integers) for card in captured_cards].sort(),  # Normalized representation, need some way of tracking which cards have been played in prior tricks and which are currently in hand
+            "Round": [self.round_number/10],  # Pass in round number as parameter
+            "Tricks to Bid": [(player.bid - player.tricks_taken)/self.round_number for player in players],  # Normalize over round number (i.e. maxmimum allowable bid for round)
+            "Scores": [(player.score/2450 for player in players)]  # Normalize over theoretical maximum score, (2450)
         }
 
         return state
