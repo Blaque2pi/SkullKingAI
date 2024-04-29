@@ -1,16 +1,15 @@
-import random, json, time, sys, os
-# import matplotlib.pyplot as plt
-import numpy as np
+import random, json, time, os
+from plot_scores import *
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing
+import traceback
 
-# Number of training games
-table_file = sys.argv[2] if len(sys.argv) > 2 else "decision"
-games = int(sys.argv[1]) if len(sys.argv) > 1 else 20000
-print(sys.argv)
+# Print game logs
+print_logs = False
 
-# Initialize q-table
-# Load q-table from the file
-with open(f'decision.json', 'r') as file:
-    q_table = json.load(file)
+# Number of sessions and games to play
+sessions = 10
+games = 10000
 
 # Integer representation of each unique card
 card_integers = {
@@ -79,13 +78,16 @@ card_integers = {
 }
 
 # Integer representation of each suit
-suits = [None, "Yellow", "Purple", "Green", "Black"]
+suit_integers = {
+    "Yellow": 1,
+    "Purple": 2,
+    "Green": 3,
+    "Black": 4,
+}
 
-# Hyperparameters
-ALPHA = 0.1
-GAMMA = 0.9
-EPSILON = 0.1
-
+# Initialize q-table
+with open('decision.json', 'r') as file:
+    q_table = json.load(file)
 
 class Card:
     def __init__(self, suit=None, rank=None, special=None):
@@ -113,11 +115,15 @@ class Player:
         self.score = 0
         self.is_human = is_human
         self.is_trick_leader = False
-        self.round_number = 0
 
+    def display_hand(self):
+        hand_message = f"\n{self.name}'s hand contains:\n"
+        for index, card in enumerate(self.hand):
+            hand_message += f"{index + 1}. {card}\n"  # Assuming the card object has a __str__ method to display it
+        if print_logs:
+            print(hand_message)
 
     def determine_legality(self, chosen_card, leading_suit=None):
-
         if not leading_suit:
             return True  # If there's no leading suit, any card can be played
 
@@ -138,38 +144,76 @@ class Player:
 
         return False
 
+    def choose_card(self, leading_suit=None):
+        """
+        Choose a card to play.
+        If human, allow them to select a card.
+        Otherwise, play a card of the leading suit if available,
+        or any random card.
+        """
+        if self.is_human:
+            self.display_hand()
+            while True:
+                try:
+                    choice = int(input(f"{self.name}, choose a card to play by entering the number: ")) - 1
+                    if 0 <= choice < len(self.hand):
+                        chosen_card = self.hand[choice]
+                        is_legal = self.determine_legality(chosen_card, leading_suit)
+                        if is_legal:
+                            break
+                        else:
+                            if print_logs:
+                                print("Invalid choice. You cannot play this card if you have a card of the leading suit!")
+                    else:
+                        if print_logs:
+                            print("Invalid choice. Please select a valid card.")
+                except ValueError:
+                    if print_logs:
+                        print("Invalid input. Please enter a number.")
+        else:
+            same_suit_cards = [card for card in self.hand if card.suit == leading_suit]
+            special_cards = [card for card in self.hand if card.special]
+            legal_cards = same_suit_cards + special_cards
+            chosen_card = random.choice(legal_cards) if legal_cards else random.choice(self.hand)
+
+        self.hand.remove(chosen_card)
+        return chosen_card
+
+    def choose_tigress_type(self):
+        """
+        Decide how to play the Tigress card.
+        If human, allow them to choose.
+        Otherwise, randomly choose between Pirate or Escape.
+        """
+        if self.is_human:
+            while True:
+                choice = input(
+                    f"{self.name}, do you want to play the Tigress as a Pirate or Escape? (Enter 'Pirate' or 'Escape'): ")
+                if choice in ['Pirate', 'Escape']:
+                    return choice
+                else:
+                    if print_logs:
+                        print("Invalid choice. Please enter 'Pirate' or 'Escape'.")
+        else:
+            return random.choice(['Pirate', 'Escape'])
+
+    def play_card(self, players, trick, leading_suit=None):
+        """
+        Play a card from hand.
+        If the chosen card is Tigress, decide how to play it.
+        """
+        card = self.choose_card(leading_suit)
+
+        # If the chosen card is the Tigress, decide how to play it and set the played_as attribute
+        if card.special == 'Tigress':
+            card.played_as = self.choose_tigress_type()
+
+        return card
+
 
 class AIAgent(Player):
     def __init__(self, name):
         super().__init__(name)
-        self.old_state = {}  # Save old state temporarily for determining reward
-        self.old_state_action = 0  # Save old action temporarily for determining reward
-        self.new_state = {}  # Save new state temporarily for determining reward
-        self.max_future_q = None
-
-    def get_state(self, trick=[]):
-        # hand should already be in a sorted state, this is good because order of cards in hand does not matter
-        # Combining all the features into one state representation, each element should be normalized
-        state = {
-            "Hand": [card_integers[f"{card}"]/len(card_integers) for card in self.get_legal_hand(determine_leading_suit(trick))],  # Needs normalized representation, would require assigning a unique integer to each unique card
-            "Winning Card": [card_integers[f"{determine_winner(trick)[1]}"]/len(card_integers) if trick else 0],
-            "Tricks to Bid": [1 if self.bid - self.tricks_taken > 0 else 0.5 if self.bid - self.tricks_taken == 0 else 0]
-        }
-
-        return state
-
-
-    def get_legal_hand(self, leading_suit=None):
-        legal_hand = []
-        if leading_suit:
-            for card in self.hand:
-                if self.determine_legality(card, leading_suit):
-                    legal_hand.append(card)
-        else:
-            legal_hand = self.hand
-
-        return legal_hand
-
 
     def get_legal_actions(self, leading_suit=None):
         legal_indices = []
@@ -196,25 +240,49 @@ class AIAgent(Player):
         # print(f"Bid is {self.bid} for hand of {hand_str}")
         return self.bid
 
+
+class TrainedAIAgent(AIAgent):
+    def __init__(self, name):
+        super().__init__(name)
+
+    def get_state(self, trick=[]):
+        # hand should already be in a sorted state, this is good because order of cards in hand does not matter
+        # Combining all the features into one state representation, each element should be normalized
+        state = {
+            "Hand": [card_integers[f"{card}"] / len(card_integers) for card in
+                     self.get_legal_hand(determine_leading_suit(trick))],
+            # Needs normalized representation, would require assigning a unique integer to each unique card
+            "Winning Card": [card_integers[f"{determine_winner(trick)[1]}"] / len(card_integers) if trick else 0],
+            "Tricks to Bid": [
+                1 if self.bid - self.tricks_taken > 0 else 0.5 if self.bid - self.tricks_taken == 0 else 0]
+        }
+
+        return state
+
+
+    def get_legal_hand(self, leading_suit=None):
+        legal_hand = []
+        if leading_suit:
+            for card in self.hand:
+                if self.determine_legality(card, leading_suit):
+                    legal_hand.append(card)
+        else:
+            legal_hand = self.hand
+
+        return legal_hand
+
+
     def play_card(self, players, trick, leading_suit=None):
         state_str = json.dumps(self.get_state(trick), sort_keys=True)
-        if state_str not in q_table:
-            num_actions = len(self.hand)
-            for card in self.hand:
-                if f"{card}" == "Tigress":
-                    num_actions += 1
-            q_table[state_str] = {f"{i}": 0 for i in range(num_actions)}
 
         # Retrieve the list of legal actions for the current state.
-
         legal_hand = self.get_legal_hand(leading_suit)
         legal_actions = len(legal_hand)
         for card in legal_hand:
             if card.special == "Tigress":
                 legal_actions += 1
 
-        # Epsilon-greedy strategy
-        if random.uniform(0, 1) < EPSILON:
+        if state_str not in q_table:
             # Select a random legal actions
             action = random.randint(0, legal_actions-1)
         else:
@@ -239,37 +307,8 @@ class AIAgent(Player):
             card_to_play = legal_hand[action]
 
         self.hand.remove(card_to_play)
-        self.old_state = state_str
-        self.old_state_action = action
 
         return card_to_play
-
-    def update_q_value(self, reward):
-        # Check turn order after trick resolution to determine how many cards will be played before next decision
-        # Iterate through potential tricks that may be played before next decision and gather maximum q from those scenarios
-
-        if self.max_future_q is None:
-            relevant_states_values = []
-            for suit in suits:
-                current_hand_normalized = [card_integers[f"{self.hand[i]}"]/len(card_integers) for i in range(len(self.hand)) if self.determine_legality(self.hand[i], suit)]
-                for i in range(len(card_integers)+1):
-                    for j in range(3):
-                        potential_state = {
-                            "Hand": current_hand_normalized,
-                            "Winning Card": [i/len(card_integers)],
-                            "Tricks to Bid": [j/2],
-                        }
-                        potential_state_str = json.dumps(potential_state, sort_keys=True)
-                        if potential_state_str in q_table:
-                            relevant_states_values.extend(q_table[potential_state_str].values())
-
-            self.max_future_q = max(relevant_states_values) if relevant_states_values else 0
-
-        current_q = q_table[self.old_state][f"{self.old_state_action}"]
-
-        # Q-learning formula
-        new_q = (1 - ALPHA) * current_q + ALPHA * (reward + GAMMA * self.max_future_q)
-        q_table[self.old_state][f"{self.old_state_action}"] = new_q
 
 
 def sort_hand(card):
@@ -285,10 +324,14 @@ def sort_hand(card):
 
 def deal_cards(players, round_number):
     # All cards including suits and specials
-    colors = ["Black", "Yellow", "Purple", "Green"]
+    colors = ["Yellow", "Purple", "Green", "Black"]
     specials = [("Escape", 5), ("Pirate", 5), ("Tigress", 1), ("Skull King", 1)]
     deck = [Card(color, rank) for color in colors for rank in range(1, 15)] + [Card(None, None, special) for special, count in specials for _ in range(count)]
+    if print_logs:
+        print("\nDeck assembled!")
     random.shuffle(deck)
+    if print_logs:
+        print("Deck Shuffled!")
 
     # Deal cards and keep hands sorted
     for i in range(round_number):
@@ -298,12 +341,38 @@ def deal_cards(players, round_number):
     # Sort each player's hand using the custom sort function
     for player in players:
         player.hand.sort(key=sort_hand)
-        player.round_number = round_number
+    if print_logs:
+        print("Hands Dealt!")
 
 
-def gather_bids(players):
+def gather_bids(players, round_number):
+    bids = {}
     for player in players:
-        player.bid = player.make_bid()  # The AI's bidding logic
+        if isinstance(player, AIAgent):
+            player.bid = player.make_bid()  # The AI's bidding logic
+        else:
+            while True:  # keep asking for bid until a valid input is given
+                try:
+                    # Asking bid from human players
+                    player.display_hand()
+                    bid = int(input(f"{player.name}, enter your bid (0 to {round_number}): "))
+                    if 0 <= bid <= round_number:
+                        player.bid = bid
+                        break  # exit the loop if a valid bid is given
+                    else:
+                        if print_logs:
+                            print(f"Invalid bid. Please enter a number between 0 and {round_number}.")
+                except ValueError:  # handle non-integer inputs
+                    if print_logs:
+                        print("Invalid input. Please enter a number.")
+        bids[player.name] = player.bid
+
+    # Announce all bids after they have been placed
+    bid_message = "\n"
+    for player_name, bid in bids.items():
+        bid_message += f"{player_name} bids {bid}\n"
+    if print_logs:
+        print(bid_message)
 
 
 def play_tricks(players, round_number):
@@ -313,27 +382,20 @@ def play_tricks(players, round_number):
         for player in players:
             player.is_trick_leader = False
             leading_suit = determine_leading_suit(current_trick)
-            card_played = player.play_card(players, current_trick, leading_suit)
+            card_played = player.play_card(players, current_trick, leading_suit if leading_suit else None)
             current_trick.append((player, card_played))
+            if print_logs:
+                print(f"{player.name} plays {card_played}")
 
         # Determine the winner of the trick
         winner = determine_winner(current_trick)
         bonus_points = determine_bonus_points(current_trick)
-        if winner[0].tricks_taken < winner[0].bid:
-            winner[0].update_q_value(2)
-        if winner[0].tricks_taken == winner[0].bid and winner[0].bid == 0:
-            winner[0].update_q_value(-round_number)
-        if winner[0].tricks_taken >= winner[0].bid and winner[0].bid > 0:
-            winner[0].update_q_value(-1)
-        if bonus_points:
-            winner[0].update_q_value(bonus_points/10)
         winner[0].tricks_taken += 1
         winner[0].bonus_points += bonus_points
         winner[0].is_trick_leader = True
         players = determine_turn_order(players)
-
-        for player in players:
-            player.max_future_q = None
+        if print_logs:
+            print(f"\n{winner[0].name} wins the trick!\n")
 
 
 def determine_leading_suit(trick):
@@ -405,26 +467,22 @@ def determine_winner(trick):
 
 def score_round(players, round_number):
     for player in players:
-        player.max_future_q = 0
         if player.bid == 0:
             if player.bid == player.tricks_taken:
                 player.score += 10 * round_number
                 player.score += player.bonus_points
-                player.update_q_value(10)
             else:
                 player.score -= 10 * round_number
-                player.update_q_value(-10)
         else:
             if player.bid == player.tricks_taken:
                 player.score += 20 * player.bid
                 player.score += player.bonus_points
-                player.update_q_value(10)
             else:
                 player.score -= 10 * abs(player.bid - player.tricks_taken)
-                player.update_q_value(-5)
+        if print_logs:
+            print(f"{player.name}'s Score: {player.score}")
         player.tricks_taken = 0
         player.bonus_points = 0
-        player.max_future_q = None
 
 
 def determine_turn_order(players, round_number=None):
@@ -444,68 +502,127 @@ def determine_turn_order(players, round_number=None):
 def play_round(players, round_number):
     default_players = players
     deal_cards(players, round_number)
-    gather_bids(players)
+    gather_bids(players, round_number)
     players = determine_turn_order(players, round_number)
     play_tricks(players, round_number)
     players = default_players
     score_round(players, round_number)
 
 
-# Function to plot data and a line of best fit
-# def plot_data_with_fit(data, title, degree=2):
-#     # Unzip the data into separate lists
-#     games, times = zip(*data)
-#
-#     # Convert lists into numpy arrays for numerical operations
-#     games = np.array(games)
-#     times = np.array(times)
-#
-#     # Create a scatter plot
-#     plt.figure(figsize=(10, 5))
-#     plt.scatter(games, times, color='b', label='Data Points')
-#
-#     # Fit a line to the data
-#     p = np.poly1d(np.polyfit(games, times, 1))  # Polynomial of degree 1 (linear)
-#
-#     # Plot the line of best fit
-#     plt.plot(games, p(games), 'r-', label=f'Line of Best Fit: {p}')
-#
-#     # Add titles and labels
-#     plt.title(title)
-#     plt.xlabel('Game Number')
-#     plt.ylabel(title)
-#     plt.legend()
-#
-#     # Save the plot to a file
-#     plt.savefig(f"{title} {table_file}.png", format='png', dpi=300)  # Save as PNG with 300 DPI
-#
-#     # Show the plot
-#     plt.show()
+def determine_final_winner(players):
+    scores = []
+    winners = []
+    winner_str = "No one"
+    # Collect scores and reset player scores
+    for player in players:
+        scores.append((player.name, player.score))
+        player.score = 0
+
+    # Determine the highest score
+    if scores:
+        max_score = max(scores, key=lambda x: x[1])[1]  # Extract the highest score using max() + lambda function
+        winners = [name for name, score in scores if score == max_score]  # List all players who have the highest score
+
+    for i, winner in enumerate(winners):
+        if i==0:
+            winner_str = winner
+        if i>0:
+            winner_str = f"{winner_str} and {winner}"
+
+    if print_logs:
+        print(f"The winner(s) is/are {winner_str}!")
+    return winners
 
 
-# No need to determine winner for Q-table
-# Log time of game, cache hits based on hand size, size of dictionary at end of each game (how many entries gained in each game)
-game_elapsed_times = []
-game_new_states = []
+def load_data(file_path):
+    if os.path.exists(file_path):
+        with open(file_path, 'r') as file:
+            return json.load(file)
+    else:
+        return []
 
-for i in range(games):
+
+def append_scores(file_path, new_scores):
+    data = load_data(file_path)
+    data.append(new_scores)
+    with open(file_path, 'w') as file:
+        json.dump(data, file, indent=4)
+
+
+# Save (or reset) JSON data to a file
+def save_data(filepath, data):
+    with open(filepath, 'w') as file:
+        json.dump(data, file)
+
+
+def run_session(players, session_number, games):
+    try:
+        games_won = {player.name: 0 for player in players}
+        for i in range(games):
+            for round_number in range(1, 11):
+                play_round(players, round_number)
+            winners = determine_final_winner(players)
+            for winner in winners:
+                games_won[winner] += 1
+        return games_won
+    except Exception as e:
+        print(f"Exception in session {session_number}: {e}")
+        traceback.print_exc()
+        raise
+
+
+def run_sessions(players, sessions=10, games=10000):
+    print(f"Running sessions for {', '.join(player.name for player in players)}...")
+    session_results = []
+
+    with ProcessPoolExecutor() as executor:
+        # Submit all sessions to the executor
+        future_to_session = {executor.submit(run_session, players, session, games): session for session in
+                             range(1, sessions + 1)}
+
+        for future in as_completed(future_to_session):
+            session_number = future_to_session[future]
+            try:
+                result = future.result()
+                print(f"Session {session_number} completed with results: {result}")
+                session_results.append(result)
+            except Exception as exc:
+                print(f"Session {session_number} generated an exception: {exc}")
+
+    # Combine results from all sessions
+    final_results = {player.name: 0 for player in players}
+    for result in session_results:
+        for name, wins in result.items():
+            final_results[name] += wins
+    for name in final_results:
+        final_results[name] /= sessions
+
+    # Operations after all sessions
+    file_path = 'scores.json'
+    append_scores(file_path, final_results)
+    plot_scores()
+    save_data(file_path, [])  # Reset the JSON file after plotting
+
+if __name__ == "__main__":
     start_time = time.perf_counter()
-    start_table_len = len(q_table)
-    players = [AIAgent("AI1"), AIAgent("AI2"), AIAgent("AI3"), AIAgent("AI4")]
-    for round_number in range(1, 11):
-        play_round(players, round_number)
+
+    multiprocessing.set_start_method('spawn')
+
+    # players = [AIAgent("AI1"), AIAgent("AI2"), AIAgent("AI3"), AIAgent("AI4")]
+    # run_sessions(players, sessions, games)
+    #
+    players = [AIAgent("AI1"), AIAgent("AI2"), AIAgent("AI3"), TrainedAIAgent("TAI")]
+    run_sessions(players, sessions, games)
+
+    players = [AIAgent("AI1"), AIAgent("AI2"), TrainedAIAgent("TAI"), AIAgent("AI4")]
+    run_sessions(players, sessions, games)
+
+    players = [AIAgent("AI1"), TrainedAIAgent("TAI"), AIAgent("AI3"), AIAgent("AI4")]
+    run_sessions(players, sessions, games)
+
+    players = [TrainedAIAgent("TAI"), AIAgent("AI2"), AIAgent("AI3"), AIAgent("AI4")]
+    run_sessions(players, sessions, games)
+
     end_time = time.perf_counter()
     elapsed_time = end_time - start_time
-    new_table_entries = len(q_table) - start_table_len
-    print(f"Game {i+1} took {elapsed_time} seconds and resulted in {new_table_entries} new table entries")
-    # Adding a new tuple to each array
-    game_elapsed_times.append((i+1, elapsed_time))
-    game_new_states.append((i+1, new_table_entries))
-
-# # Plotting the data
-# plot_data_with_fit(game_elapsed_times, 'Elapsed Time')
-# plot_data_with_fit(game_new_states, 'New States')
-
-
-with open(f'{table_file}.json', 'w') as file:
-    json.dump(q_table, file, indent=4)
+    print(f"Elapsed time: {elapsed_time} seconds")

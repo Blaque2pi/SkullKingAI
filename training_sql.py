@@ -1,16 +1,16 @@
-import random, json, time, sys, os
-# import matplotlib.pyplot as plt
+import random, json, time, sys, sqlite3
+import matplotlib.pyplot as plt
 import numpy as np
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing
+import traceback
 
-# Number of training games
-table_file = sys.argv[2] if len(sys.argv) > 2 else "decision"
-games = int(sys.argv[1]) if len(sys.argv) > 1 else 20000
-print(sys.argv)
+# Initialize q-table name and number of training games
+db_name = sys.argv[2] if len(sys.argv) > 2 else "q_table"
+games = int(sys.argv[1]) if len(sys.argv) > 1 else 100
 
-# Initialize q-table
-# Load q-table from the file
-with open(f'decision.json', 'r') as file:
-    q_table = json.load(file)
+# Initialize q-table path
+db_path = f'{db_name}.db'
 
 # Integer representation of each unique card
 card_integers = {
@@ -79,7 +79,12 @@ card_integers = {
 }
 
 # Integer representation of each suit
-suits = [None, "Yellow", "Purple", "Green", "Black"]
+suit_integers = {
+    "Yellow": 1,
+    "Purple": 2,
+    "Green": 3,
+    "Black": 4,
+}
 
 # Hyperparameters
 ALPHA = 0.1
@@ -146,30 +151,19 @@ class AIAgent(Player):
         self.old_state_action = 0  # Save old action temporarily for determining reward
         self.new_state = {}  # Save new state temporarily for determining reward
         self.max_future_q = None
+        self.added_states = 0
 
-    def get_state(self, trick=[]):
+    def get_state(self, players, trick=[]):
         # hand should already be in a sorted state, this is good because order of cards in hand does not matter
         # Combining all the features into one state representation, each element should be normalized
         state = {
-            "Hand": [card_integers[f"{card}"]/len(card_integers) for card in self.get_legal_hand(determine_leading_suit(trick))],  # Needs normalized representation, would require assigning a unique integer to each unique card
+            "Hand": [card_integers[f"{self.hand[i]}"]/len(card_integers) for i in range(len(self.hand))],  # Needs normalized representation, would require assigning a unique integer to each unique card
+            "Leading Suit": [suit_integers[determine_leading_suit(trick)]/len(suit_integers) if determine_leading_suit(trick) else 0],  # Normalized representation
             "Winning Card": [card_integers[f"{determine_winner(trick)[1]}"]/len(card_integers) if trick else 0],
-            "Tricks to Bid": [1 if self.bid - self.tricks_taken > 0 else 0.5 if self.bid - self.tricks_taken == 0 else 0]
+            "Tricks to Bid": [(self.bid - self.tricks_taken + 10)/20],  # Normalize over round number (i.e. maxmimum allowable bid for round)
         }
 
         return state
-
-
-    def get_legal_hand(self, leading_suit=None):
-        legal_hand = []
-        if leading_suit:
-            for card in self.hand:
-                if self.determine_legality(card, leading_suit):
-                    legal_hand.append(card)
-        else:
-            legal_hand = self.hand
-
-        return legal_hand
-
 
     def get_legal_actions(self, leading_suit=None):
         legal_indices = []
@@ -196,47 +190,38 @@ class AIAgent(Player):
         # print(f"Bid is {self.bid} for hand of {hand_str}")
         return self.bid
 
-    def play_card(self, players, trick, leading_suit=None):
-        state_str = json.dumps(self.get_state(trick), sort_keys=True)
-        if state_str not in q_table:
-            num_actions = len(self.hand)
-            for card in self.hand:
-                if f"{card}" == "Tigress":
-                    num_actions += 1
-            q_table[state_str] = {f"{i}": 0 for i in range(num_actions)}
+    def play_card(self, players, trick, leading_suit=None, db_path='q_table.db'):
+        state_str = json.dumps(self.get_state(players, trick), sort_keys=True)
+        num_actions = len(self.hand) + sum(1 for card in self.hand if card == "Tigress")
+        ensure_state_exists(db_path, state_str, num_actions)
 
         # Retrieve the list of legal actions for the current state.
-
-        legal_hand = self.get_legal_hand(leading_suit)
-        legal_actions = len(legal_hand)
-        for card in legal_hand:
-            if card.special == "Tigress":
-                legal_actions += 1
+        legal_actions = self.get_legal_actions(leading_suit)
+        action_values = fetch_q_values_for_actions(db_path, state_str, legal_actions)
 
         # Epsilon-greedy strategy
         if random.uniform(0, 1) < EPSILON:
-            # Select a random legal actions
-            action = random.randint(0, legal_actions-1)
+            # Select a random action from the set of legal actions
+            action = random.choice(legal_actions)
         else:
             # Find the max Q-value among legal actions for the current state
-            max_q_value = max([q_table[state_str][f"{i}"] for i in range(legal_actions)])
-            max_actions = [i for i in range(legal_actions) if q_table[state_str][f"{i}"] == max_q_value]
+            max_q_value = max(action_values.values())
+            max_actions = [action for action in action_values if action_values[action] == max_q_value]
+            action = int(random.choice(max_actions))
 
-            # Randomly select one of the max actions
-            action = random.choice(max_actions)
 
         # check if tigress was played as a pirate or escape, and edit the corresponding card accordingly
         card_to_play = None
-        if action == len(legal_hand):
-            for card in legal_hand:
+        if action == len(self.hand):
+            for card in self.hand:
                 if card.special == "Tigress":
                     card.played_as = "Escape"
                     card_to_play = card
-        elif legal_hand[action].special == "Tigress":
-            legal_hand[action].played_as = "Pirate"
-            card_to_play = legal_hand[action]
+        elif self.hand[action].special == "Tigress":
+            self.hand[action].played_as = "Pirate"
+            card_to_play = self.hand[action]
         else:
-            card_to_play = legal_hand[action]
+            card_to_play = self.hand[action]
 
         self.hand.remove(card_to_play)
         self.old_state = state_str
@@ -244,32 +229,45 @@ class AIAgent(Player):
 
         return card_to_play
 
-    def update_q_value(self, reward):
+    def update_q_value(self, reward, db_path='q_table.db'):
         # Check turn order after trick resolution to determine how many cards will be played before next decision
         # Iterate through potential tricks that may be played before next decision and gather maximum q from those scenarios
-
         if self.max_future_q is None:
-            relevant_states_values = []
-            for suit in suits:
-                current_hand_normalized = [card_integers[f"{self.hand[i]}"]/len(card_integers) for i in range(len(self.hand)) if self.determine_legality(self.hand[i], suit)]
-                for i in range(len(card_integers)+1):
-                    for j in range(3):
-                        potential_state = {
-                            "Hand": current_hand_normalized,
-                            "Winning Card": [i/len(card_integers)],
-                            "Tricks to Bid": [j/2],
-                        }
-                        potential_state_str = json.dumps(potential_state, sort_keys=True)
-                        if potential_state_str in q_table:
-                            relevant_states_values.extend(q_table[potential_state_str].values())
+            current_hand_normalized = [card_integers[f"{self.hand[i]}"]/len(card_integers) for i in range(len(self.hand))]
+            with sqlite3.connect(db_path) as conn:
+                cur = conn.cursor()
 
-            self.max_future_q = max(relevant_states_values) if relevant_states_values else 0
+                relevant_states_values = []
 
-        current_q = q_table[self.old_state][f"{self.old_state_action}"]
+                for i in range(len(suit_integers)+1):
+                    for j in range(len(card_integers)+1):
+                        for k in range(21):
+                            potential_state = {
+                                "Hand": current_hand_normalized,
+                                "Leading Suit": [i/len(suit_integers)],
+                                "Winning Card": [j/len(card_integers)],
+                                "Tricks to Bid": [k/20],
+                            }
+                            potential_state_str = json.dumps(potential_state, sort_keys=True)
+                            cur.execute("SELECT value FROM QTable WHERE state=?", (potential_state_str,))
+                            fetched = cur.fetchall()
+                            relevant_states_values.extend([val[0] for val in fetched])  # Extract values from fetched tuples
 
-        # Q-learning formula
-        new_q = (1 - ALPHA) * current_q + ALPHA * (reward + GAMMA * self.max_future_q)
-        q_table[self.old_state][f"{self.old_state_action}"] = new_q
+                self.max_future_q = max(relevant_states_values) if relevant_states_values else 0
+
+                # Fetch the current Q-value
+                cur.execute("SELECT value FROM QTable WHERE state=? AND action=?",
+                            (self.old_state, str(self.old_state_action)))
+                current_q_result = cur.fetchone()
+                current_q = current_q_result[0] if current_q_result else 0  # Assume 0 if not found
+
+                # Calculate the new Q-value
+                new_q = (1 - ALPHA) * current_q + ALPHA * (reward + GAMMA * self.max_future_q)
+
+                # Update the Q-value in the database
+                cur.execute("INSERT OR REPLACE INTO QTable (state, action, value) VALUES (?, ?, ?)",
+                            (self.old_state, str(self.old_state_action), new_q))
+                conn.commit()
 
 
 def sort_hand(card):
@@ -306,25 +304,25 @@ def gather_bids(players):
         player.bid = player.make_bid()  # The AI's bidding logic
 
 
-def play_tricks(players, round_number):
+def play_tricks(players, round_number, db_path='q_table.db'):
     for _ in range(round_number):
         current_trick = []
 
         for player in players:
             player.is_trick_leader = False
             leading_suit = determine_leading_suit(current_trick)
-            card_played = player.play_card(players, current_trick, leading_suit)
+            card_played = player.play_card(players, current_trick, leading_suit, db_path)
             current_trick.append((player, card_played))
 
         # Determine the winner of the trick
         winner = determine_winner(current_trick)
         bonus_points = determine_bonus_points(current_trick)
         if winner[0].tricks_taken < winner[0].bid:
-            winner[0].update_q_value(2)
+            winner[0].update_q_value(5)
         if winner[0].tricks_taken == winner[0].bid and winner[0].bid == 0:
-            winner[0].update_q_value(-round_number)
+            winner[0].update_q_value(-10)
         if winner[0].tricks_taken >= winner[0].bid and winner[0].bid > 0:
-            winner[0].update_q_value(-1)
+            winner[0].update_q_value(-2)
         if bonus_points:
             winner[0].update_q_value(bonus_points/10)
         winner[0].tricks_taken += 1
@@ -403,7 +401,7 @@ def determine_winner(trick):
     return highest_special or highest_suit_card
 
 
-def score_round(players, round_number):
+def score_round(players, round_number, db_path='q_table'):
     for player in players:
         player.max_future_q = 0
         if player.bid == 0:
@@ -441,71 +439,151 @@ def determine_turn_order(players, round_number=None):
     return players
 
 
-def play_round(players, round_number):
+def play_round(players, round_number, db_path='q_table.db'):
     default_players = players
     deal_cards(players, round_number)
     gather_bids(players)
     players = determine_turn_order(players, round_number)
-    play_tricks(players, round_number)
+    play_tricks(players, round_number, db_path=db_path)
     players = default_players
     score_round(players, round_number)
 
 
 # Function to plot data and a line of best fit
-# def plot_data_with_fit(data, title, degree=2):
-#     # Unzip the data into separate lists
-#     games, times = zip(*data)
-#
-#     # Convert lists into numpy arrays for numerical operations
-#     games = np.array(games)
-#     times = np.array(times)
-#
-#     # Create a scatter plot
-#     plt.figure(figsize=(10, 5))
-#     plt.scatter(games, times, color='b', label='Data Points')
-#
-#     # Fit a line to the data
-#     p = np.poly1d(np.polyfit(games, times, 1))  # Polynomial of degree 1 (linear)
-#
-#     # Plot the line of best fit
-#     plt.plot(games, p(games), 'r-', label=f'Line of Best Fit: {p}')
-#
-#     # Add titles and labels
-#     plt.title(title)
-#     plt.xlabel('Game Number')
-#     plt.ylabel(title)
-#     plt.legend()
-#
-#     # Save the plot to a file
-#     plt.savefig(f"{title} {table_file}.png", format='png', dpi=300)  # Save as PNG with 300 DPI
-#
-#     # Show the plot
-#     plt.show()
+def plot_data_with_fit(data, title, degree=2):
+    # Unzip the data into separate lists
+    games, times = zip(*data)
+
+    # Convert lists into numpy arrays for numerical operations
+    games = np.array(games)
+    times = np.array(times)
+
+    # Create a scatter plot
+    plt.figure(figsize=(10, 5))
+    plt.scatter(games, times, color='b', label='Data Points')
+
+    # Fit a line to the data
+    p = np.poly1d(np.polyfit(games, times, 1))  # Polynomial of degree 1 (linear)
+
+    # Plot the line of best fit
+    plt.plot(games, p(games), 'r-', label=f'Line of Best Fit: {p}')
+
+    # Add titles and labels
+    plt.title(title)
+    plt.xlabel('Game Number')
+    plt.ylabel(title)
+    plt.legend()
+
+    # Save the plot to a file
+    plt.savefig(f"{title}.png", format='png', dpi=300)  # Save as PNG with 300 DPI
+
+    # Show the plot
+    plt.show()
+
+
+def run_game(players, game_number, db_path='q_table.db'):
+    try:
+        start_time = time.perf_counter()
+        game_added_states = 0
+        print(f'Game {game_number} has started')
+        for round_number in range(1, 11):
+            play_round(players, round_number, db_path=db_path)
+        for player in players:
+            game_added_states += player.added_states
+        end_time = time.perf_counter()
+        game_elapsed_time = end_time - start_time
+        print(f"Game {game_number} took {game_elapsed_time} seconds and resulted in {game_added_states} new table entries")
+        return [game_elapsed_time, game_added_states]
+
+    except Exception as e:
+        print(f"Exception in game {game_number}: {e}")
+        traceback.print_exc()
+        raise
+
+
+def create_database(db_path='q_table.db'):
+    # Connect to SQLite database (or create it if it doesn't exist)
+    conn = sqlite3.connect(db_path)
+    # Create a cursor object using the cursor() method
+    cur = conn.cursor()
+    # Create the table if it doesn't exist with the correct columns
+    cur.execute('''
+    CREATE TABLE IF NOT EXISTS QTable (
+        state TEXT,
+        action TEXT,
+        value REAL,
+        PRIMARY KEY (state, action)
+    )
+    ''')
+    conn.commit()
+    conn.close()
+
+
+def initialize_database(db_path):
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute("PRAGMA journal_mode=WAL;")
+    c.execute("PRAGMA synchronous=NORMAL;")  # NORMAL for faster execution, consider FULL for more data safety
+    conn.commit()
+    conn.close()
+
+
+def ensure_state_exists(db_path, state_str, num_actions):
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.cursor()
+        for i in range(num_actions):
+            cur.execute('''
+                INSERT OR IGNORE INTO QTable (state, action, value)
+                VALUES (?, ?, 0)
+            ''', (state_str, str(i),))
+        conn.commit()
+
+
+def fetch_q_values_for_actions(db_path, state_str, legal_actions):
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.cursor()
+        cur.execute('''
+            SELECT action, value FROM QTable WHERE state=? AND action IN ({})
+        '''.format(','.join('?'*len(legal_actions))), (state_str, *legal_actions))
+        return {action: value for action, value in cur.fetchall()}
+
+
+def upsert_qtable(state, action, value, db_path='q_table.db'):
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.cursor()
+        cur.execute('''
+        INSERT OR REPLACE INTO QTable (state, action, value)
+        VALUES (?, ?, ?)
+        ''', (state, action, value))
+        conn.commit()
 
 
 # No need to determine winner for Q-table
-# Log time of game, cache hits based on hand size, size of dictionary at end of each game (how many entries gained in each game)
-game_elapsed_times = []
-game_new_states = []
 
-for i in range(games):
-    start_time = time.perf_counter()
-    start_table_len = len(q_table)
+if __name__ == "__main__":
+    # Log time of game, cache hits based on hand size, size of dictionary at end of each game (how many entries gained in each game)
+    game_elapsed_times = []
+    game_new_states = []
+    multiprocessing.set_start_method('spawn')
+    create_database(db_path)
+    initialize_database(db_path)
     players = [AIAgent("AI1"), AIAgent("AI2"), AIAgent("AI3"), AIAgent("AI4")]
-    for round_number in range(1, 11):
-        play_round(players, round_number)
-    end_time = time.perf_counter()
-    elapsed_time = end_time - start_time
-    new_table_entries = len(q_table) - start_table_len
-    print(f"Game {i+1} took {elapsed_time} seconds and resulted in {new_table_entries} new table entries")
-    # Adding a new tuple to each array
-    game_elapsed_times.append((i+1, elapsed_time))
-    game_new_states.append((i+1, new_table_entries))
+    with ProcessPoolExecutor() as executor:
+        # Submit all games to the executor
+        future_to_session = {executor.submit(run_game, players, game, db_path): game for game in
+                             range(1, games + 1)}
 
-# # Plotting the data
-# plot_data_with_fit(game_elapsed_times, 'Elapsed Time')
-# plot_data_with_fit(game_new_states, 'New States')
+        for future in as_completed(future_to_session):
+            game_number = future_to_session[future]
+            try:
+                result = future.result()
+                # Adding a new tuple to each array
+                game_elapsed_times.append((game_number, result[0]))
+                game_new_states.append((game_number, result[1]))
+            except Exception as exc:
+                print(f"Game {game_number} generated an exception: {exc}")
 
 
-with open(f'{table_file}.json', 'w') as file:
-    json.dump(q_table, file, indent=4)
+    # Plotting the data
+    plot_data_with_fit(game_elapsed_times, 'Elapsed Time')
+    plot_data_with_fit(game_new_states, 'New States')
