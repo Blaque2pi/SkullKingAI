@@ -6,4 +6,7 @@ __training.py__ trains the model and saves to a json format<br />
 __training_sql.py__ trains the model, reading from a sql data base. This is a work in progress and needs to be modified in order to properly handle read/write conflicts in the database.<br />
 __combine_tables.py__ combines the q_tables produced from the training.py script and combines them into a single json file.<br />
 __json_sqlite.py__ converts json format q_tables into a sql data base which is useable by evaluate_sql.py and game.py<br />
-__main.py__ is a remnant from previous versions and is currently not functional<br />
+__main.py__ is a remnant from previous versions and is currently not functional<br /><br /><br />
+
+
+Due to storage limitations I cannot include a copy of my q_table in this repo. In order to generate your own, you may run __training.py__, and convert the resulting json into a sql database via __json_sqlite.py__. If this database is saved as q_table.db, it should be useable by __game.py__ and __evaluate_sql.py__.
